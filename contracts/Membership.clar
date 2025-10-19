@@ -22,6 +22,8 @@
 (define-constant ERR-NO-VOTING-RIGHTS (err u405))
 (define-constant ERR-PROPOSAL-NOT-ACTIVE (err u406))
 (define-constant ERR-INVALID-TIER (err u407))
+(define-constant ERR-ALREADY-REGISTERED (err u410))
+(define-constant ERR-NO-REFERRAL-BONUS (err u411))
 
 (define-constant CONTRACT-OWNER tx-sender)
 (define-constant MEMBERSHIP-PRICE-BASIC u1000000)
@@ -80,6 +82,12 @@
     guest-passes: uint,
     priority-booking: bool,
     exclusive-events: bool
+})
+
+(define-map referrals principal {
+    referrer: principal,
+    bonus-accrued: uint,
+    claimed: bool
 })
 
 (define-public (mint-membership (membership-type (string-ascii 20)) (recipient principal))
@@ -412,5 +420,30 @@
             )
         )
     )
+)
+
+(define-public (register-referral (referee principal) (referrer principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (asserts! (is-none (map-get? referrals referee)) ERR-ALREADY-REGISTERED)
+        (ok (map-set referrals referee {
+            referrer: referrer,
+            bonus-accrued: u0,
+            claimed: false
+        }))
+    )
+)
+
+(define-public (claim-referral-bonus (referrer principal) (amount uint))
+    (let ((referral-data (unwrap! (map-get? referrals referrer) ERR-NO-REFERRAL-BONUS)))
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (asserts! (> (get bonus-accrued referral-data) u0) ERR-NO-REFERRAL-BONUS)
+        (try! (stx-transfer? amount tx-sender referrer))
+        (ok amount)
+    )
+)
+
+(define-read-only (get-referral-info (member principal))
+    (map-get? referrals member)
 )
 

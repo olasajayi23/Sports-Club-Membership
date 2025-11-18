@@ -24,6 +24,9 @@
 (define-constant ERR-INVALID-TIER (err u407))
 (define-constant ERR-ALREADY-REGISTERED (err u410))
 (define-constant ERR-NO-REFERRAL-BONUS (err u411))
+(define-constant ERR-INSUFFICIENT-GUEST-PASSES (err u412))
+(define-constant ERR-LISTING-NOT-FOUND (err u413))
+(define-constant ERR-INSUFFICIENT-FUNDS (err u414))
 
 (define-constant CONTRACT-OWNER tx-sender)
 (define-constant MEMBERSHIP-PRICE-BASIC u1000000)
@@ -36,6 +39,7 @@
 
 (define-data-var next-membership-id uint u1)
 (define-data-var next-proposal-id uint u1)
+(define-data-var next-listing-id uint u1)
 (define-data-var club-treasury uint u0)
 (define-data-var total-members uint u0)
 
@@ -90,6 +94,18 @@
     claimed: bool
 })
 
+(define-map guest-pass-listings uint {
+    seller: principal,
+    quantity: uint,
+    price-per-pass: uint,
+    created-block: uint
+})
+
+(define-map member-guest-pass-inventory principal {
+    available-passes: uint,
+    total-listed: uint
+})
+
 (define-public (mint-membership (membership-type (string-ascii 20)) (recipient principal))
     (let ((membership-id (var-get next-membership-id))
           (current-block stacks-block-height)
@@ -118,6 +134,11 @@
             voting-power: tier
         })
         (set-membership-benefits membership-id tier)
+        (let ((guest-passes (get-guest-passes-for-tier tier)))
+            (map-set member-guest-pass-inventory recipient {
+                available-passes: guest-passes,
+                total-listed: u0
+            }))
         (var-set next-membership-id (+ membership-id u1))
         (var-set club-treasury (+ (var-get club-treasury) price))
         (var-set total-members (+ (var-get total-members) u1))
@@ -250,6 +271,78 @@
             total-benefits-claimed: u0,
             voting-power: (get tier membership)
         })
+        (ok true)
+    )
+)
+
+(define-public (list-guest-passes (quantity uint) (price-per-pass uint))
+    (let ((inventory (unwrap! (map-get? member-guest-pass-inventory tx-sender) ERR-INSUFFICIENT-GUEST-PASSES))
+          (available (get available-passes inventory))
+          (listing-id (var-get next-listing-id)))
+        (asserts! (> quantity u0) ERR-INSUFFICIENT-GUEST-PASSES)
+        (asserts! (>= available quantity) ERR-INSUFFICIENT-GUEST-PASSES)
+        (map-set guest-pass-listings listing-id {
+            seller: tx-sender,
+            quantity: quantity,
+            price-per-pass: price-per-pass,
+            created-block: stacks-block-height
+        })
+        (map-set member-guest-pass-inventory tx-sender {
+            available-passes: (- available quantity),
+            total-listed: (+ (get total-listed inventory) quantity)
+        })
+        (var-set next-listing-id (+ listing-id u1))
+        (ok listing-id)
+    )
+)
+
+(define-public (purchase-guest-passes (listing-id uint) (quantity-to-buy uint))
+    (let ((listing (unwrap! (map-get? guest-pass-listings listing-id) ERR-LISTING-NOT-FOUND))
+          (seller (get seller listing))
+          (available-in-listing (get quantity listing))
+          (price-per-pass (get price-per-pass listing))
+          (total-cost (* quantity-to-buy price-per-pass))
+          (buyer-inventory (unwrap! (map-get? member-guest-pass-inventory tx-sender) ERR-INSUFFICIENT-GUEST-PASSES)))
+        (asserts! (> quantity-to-buy u0) ERR-INSUFFICIENT-GUEST-PASSES)
+        (asserts! (>= available-in-listing quantity-to-buy) ERR-INSUFFICIENT-GUEST-PASSES)
+        (try! (stx-transfer? total-cost tx-sender seller))
+        (let ((remaining-in-listing (- available-in-listing quantity-to-buy)))
+            (if (> remaining-in-listing u0)
+                (map-set guest-pass-listings listing-id {
+                    seller: seller,
+                    quantity: remaining-in-listing,
+                    price-per-pass: price-per-pass,
+                    created-block: (get created-block listing)
+                })
+                (map-delete guest-pass-listings listing-id)
+            )
+        )
+        (let ((seller-inventory (unwrap! (map-get? member-guest-pass-inventory seller) ERR-INSUFFICIENT-GUEST-PASSES)))
+            (map-set member-guest-pass-inventory seller {
+                available-passes: (get available-passes seller-inventory),
+                total-listed: (- (get total-listed seller-inventory) quantity-to-buy)
+            })
+        )
+        (map-set member-guest-pass-inventory tx-sender {
+            available-passes: (+ (get available-passes buyer-inventory) quantity-to-buy),
+            total-listed: (get total-listed buyer-inventory)
+        })
+        (ok true)
+    )
+)
+
+(define-public (delist-guest-passes (listing-id uint))
+    (let ((listing (unwrap! (map-get? guest-pass-listings listing-id) ERR-LISTING-NOT-FOUND))
+          (seller (get seller listing))
+          (quantity (get quantity listing)))
+        (asserts! (is-eq tx-sender seller) ERR-NOT-AUTHORIZED)
+        (let ((inventory (unwrap! (map-get? member-guest-pass-inventory seller) ERR-INSUFFICIENT-GUEST-PASSES)))
+            (map-set member-guest-pass-inventory seller {
+                available-passes: (+ (get available-passes inventory) quantity),
+                total-listed: (- (get total-listed inventory) quantity)
+            })
+        )
+        (map-delete guest-pass-listings listing-id)
         (ok true)
     )
 )
@@ -445,5 +538,35 @@
 
 (define-read-only (get-referral-info (member principal))
     (map-get? referrals member)
+)
+
+(define-read-only (get-guest-pass-listing (listing-id uint))
+    (match (map-get? guest-pass-listings listing-id)
+        listing (ok listing)
+        (err u404)
+    )
+)
+
+(define-read-only (get-member-guest-passes (member principal))
+    (match (map-get? member-guest-pass-inventory member)
+        inventory (ok {
+            available-passes: (get available-passes inventory),
+            total-listed: (get total-listed inventory)
+        })
+        (err u404)
+    )
+)
+
+(define-private (get-guest-passes-for-tier (tier uint))
+    (if (is-eq tier u1)
+        u1
+        (if (is-eq tier u2)
+            u3
+            (if (is-eq tier u3)
+                u5
+                u0
+            )
+        )
+    )
 )
 
